@@ -3,6 +3,7 @@ TTS Engine - OPTIMIZED VERSION
 - Padding: 1 từ "ừ"
 - Normalize punctuation: . ! ? ; : → ,
 - OPTIMIZED: Cache regex, faster processing
+- Added generate_audio for gapless playback
 """
 import pyttsx3
 from gtts import gTTS
@@ -14,7 +15,6 @@ import os
 import time
 import threading
 import re
-
 
 class TTSEngine:
     # Compile regex once (faster!)
@@ -33,14 +33,14 @@ class TTSEngine:
         self.padding_words = self.settings.get('padding_words', 1)
         self.padding_word = self.settings.get('padding_word', 'ừ')
         
+        # Track last playback time for smart padding
+        self.last_playback_time = 0
+        
         # Pre-create padding string (faster!)
         self._padding_cache = self._create_padding()
         
-        if mode in ['edge', 'gtts']:
-            try:
-                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-            except:
-                pass
+        # Always initialize mixer for playback (even for pyttsx3)
+        self._ensure_mixer_init()
         
         if mode == 'edge':
             self._init_edge_tts()
@@ -49,6 +49,15 @@ class TTSEngine:
         else:
             self._init_pyttsx3()
     
+    def _ensure_mixer_init(self):
+        """Ensure pygame mixer is initialized"""
+        if not pygame.mixer.get_init():
+            try:
+                pygame.mixer.init(frequency=24000, size=-16, channels=2, buffer=1024)
+                if self.ui: self.ui.log("✅ Audio Mixer Initialized", 'info')
+            except Exception as e:
+                if self.ui: self.ui.log(f"⚠️ Mixer Init Failed: {e}", 'warning')
+
     def _init_edge_tts(self):
         """Initialize Edge TTS"""
         self.edge_voice_male = "vi-VN-NamMinhNeural"
@@ -64,31 +73,10 @@ class TTSEngine:
             self.ui.log("✅ Google TTS initialized", 'info')
     
     def _init_pyttsx3(self):
-        """Initialize pyttsx3"""
-        try:
-            self.tts_engine = pyttsx3.init()
-            self.tts_engine.setProperty('rate', self.settings.get('tts_speed', 150))
-            self.tts_engine.setProperty('volume', 1.0)
-            
-            voices = self.tts_engine.getProperty('voices')
-            self.selected_voice_id = None
-            
-            for voice in voices:
-                name_lower = voice.name.lower()
-                id_lower = voice.id.lower()
-                
-                if any(x in name_lower or x in id_lower for x in ['vietnam', 'việt', 'viet', 'vi-', 'vivn']):
-                    self.selected_voice_id = voice.id
-                    self.tts_engine.setProperty('voice', voice.id)
-                    break
-            
-            if not self.selected_voice_id and voices:
-                self.selected_voice_id = voices[0].id
-                self.tts_engine.setProperty('voice', voices[0].id)
-                    
-        except Exception as e:
-            self.tts_engine = None
-    
+        """Initialize pyttsx3 settings (Engine init is delayed)"""
+        if self.ui:
+            self.ui.log("✅ pyttsx3 (Offline) mode selected", 'info')
+
     def _create_padding(self):
         """Tạo padding text"""
         if self.padding_words <= 0:
@@ -97,6 +85,14 @@ class TTSEngine:
         # Dùng dấu phẩy (pause ngắn)
         padding = " ".join([self.padding_word] * self.padding_words) + ", "
         return padding
+
+    def update_padding(self, word, count):
+        """Update padding settings dynamically"""
+        self.padding_word = word
+        self.padding_words = count
+        self._padding_cache = self._create_padding()
+        if self.ui:
+            self.ui.log(f"🔄 Updated padding: {count} x '{word}'", 'info')
     
     def _normalize_punctuation(self, text):
         """Thay tất cả dấu ngắt câu thành dấu phẩy (OPTIMIZED)"""
@@ -104,105 +100,222 @@ class TTSEngine:
         text = self.PUNCT_PATTERN.sub(',', text)
         text = self.COMMA_PATTERN.sub(',', text)
         return text.strip(',').strip()
-    
-    def speak(self, text, gender='female'):
-        """Speak the given text"""
-        with self.lock:
-            self.is_playing = True
+
+    def generate_audio(self, text, gender='female'):
+        """
+        Generate audio bytes for the given text
+        Smart Padding: Only add padding if silence > 2s
+        """
+        if not text:
+            return None
             
-            try:
-                # Normalize punctuation (fast!)
-                text = self._normalize_punctuation(text)
-                
-                if self.mode == 'edge':
-                    self._speak_edge(text, gender)
-                elif self.mode == 'gtts':
-                    self._speak_google(text)
-                else:
-                    self._speak_pyttsx3(text)
-            finally:
-                self.is_playing = False
-    
-    def _speak_edge(self, text, gender='female'):
-        """Speak using Edge TTS"""
+        # Check time since last playback
+        current_time = time.time()
+        time_since_last = current_time - self.last_playback_time
+        
+        # Determine if we need padding
+        need_padding = time_since_last > 2.0
+        
+        # Update last playback time
+        self.last_playback_time = current_time
+        
+        # Prepare text (handle word padding here)
+        final_text = text
+        
+        if need_padding:
+            # Use padding word if available, otherwise default to "Dạ vâng" if empty
+            padding = self.padding_word if self.padding_word and self.padding_word.strip() else "Dạ vâng"
+            final_text = f"{padding} {text}"
+            if self.ui: self.ui.log(f"➕ Smart Padding: '{padding}'", 'info')
+
         try:
-            voice = self.edge_voice_male if gender == 'male' else self.edge_voice_female
+            # Generate main audio
+            audio_data = None
+            if self.mode == 'edge':
+                audio_data = self._generate_edge_audio(final_text, gender)
+            elif self.mode == 'gtts':
+                audio_data = self._generate_gtts_audio(final_text)
+            else:
+                audio_data = self._generate_pyttsx3_audio(final_text)
             
-            # Use cached padding (faster!)
-            padded_text = self._padding_cache + text
+            if not audio_data:
+                return None
+
+            # Return list for compatibility with voicetrans.py
+            return [audio_data]
             
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
-                temp_file = fp.name
-            
-            async def generate():
-                communicate = edge_tts.Communicate(padded_text, voice)
-                await communicate.save(temp_file)
-            
-            asyncio.run(generate())
-            
-            # Play
-            sound = pygame.mixer.Sound(temp_file)
-            sound.set_volume(1.0)
-            
-            try:
-                os.unlink(temp_file)
-            except:
-                pass
-            
-            sound.play()
-            
-            while pygame.mixer.get_busy():
-                time.sleep(0.05)
-                
         except Exception as e:
             if self.ui:
-                self.ui.log(f"❌ Edge TTS error: {str(e)}", 'error')
-    
-    def _speak_google(self, text):
-        """Speak using Google TTS"""
-        try:
-            padded_text = self._padding_cache + text
-            
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as fp:
-                temp_file = fp.name
-            
-            tts = gTTS(text=padded_text, lang='vi', slow=False, timeout=3)
-            tts.save(temp_file)
-            
-            sound = pygame.mixer.Sound(temp_file)
-            sound.set_volume(1.0)
-            
-            try:
-                os.unlink(temp_file)
-            except:
-                pass
-            
-            sound.play()
-            
-            while pygame.mixer.get_busy():
-                time.sleep(0.05)
-                
-        except Exception as e:
-            if self.ui:
-                self.ui.log(f"❌ Google TTS error: {str(e)}", 'error')
-    
-    def _speak_pyttsx3(self, text):
-        """Speak using pyttsx3"""
-        if not self.tts_engine:
-            return
+                self.ui.log(f"❌ Audio generation error: {str(e)}", 'error')
+            return None
+
+    def _generate_edge_audio(self, text, gender):
+        """Generate audio bytes using Edge TTS"""
+        voice = self.edge_voice_male if gender == 'male' else self.edge_voice_female
+        
+        speed = self.settings.get('tts_speed', 150)
+        rate_str = f"{'+' if speed >= 100 else ''}{speed - 100}%"
+        
+        temp_file = os.path.join(tempfile.gettempdir(), f"tts_{int(time.time()*1000)}.mp3")
+        
+        async def generate():
+            communicate = edge_tts.Communicate(text, voice, rate=rate_str)
+            await communicate.save(temp_file)
         
         try:
-            temp_engine = pyttsx3.init()
-            temp_engine.setProperty('rate', self.settings.get('tts_speed', 150))
-            temp_engine.setProperty('volume', 1.0)
+            asyncio.run(generate())
             
-            if self.selected_voice_id:
-                temp_engine.setProperty('voice', self.selected_voice_id)
-            
-            temp_engine.say(text)
-            temp_engine.runAndWait()
-            
-            del temp_engine
-            
+            with open(temp_file, 'rb') as f:
+                audio_data = f.read()
+                
+            try:
+                os.unlink(temp_file)
+            except:
+                pass
+                
+            return audio_data
         except Exception as e:
+            raise e
+
+    def _generate_gtts_audio(self, text):
+        """Generate audio bytes using gTTS"""
+        tts = gTTS(text=text, lang='vi')
+        
+        temp_file = os.path.join(tempfile.gettempdir(), f"gtts_{int(time.time()*1000)}.mp3")
+        tts.save(temp_file)
+        
+        with open(temp_file, 'rb') as f:
+            audio_data = f.read()
+            
+        try:
+            os.unlink(temp_file)
+        except:
             pass
+            
+        return audio_data
+
+    def _generate_pyttsx3_audio(self, text):
+        """Generate audio bytes using pyttsx3 (Thread-Safe)"""
+        temp_file = os.path.join(tempfile.gettempdir(), f"pyttsx3_{int(time.time()*1000)}.wav")
+        
+        try:
+            # Initialize engine LOCALLY to avoid threading issues
+            engine = pyttsx3.init()
+            engine.setProperty('rate', self.settings.get('tts_speed', 150))
+            engine.setProperty('volume', 1.0)
+            
+            # Select Voice
+            voices = engine.getProperty('voices')
+            selected_voice_id = None
+            for voice in voices:
+                name_lower = voice.name.lower()
+                id_lower = voice.id.lower()
+                if any(x in name_lower or x in id_lower for x in ['vietnam', 'việt', 'viet', 'vi-', 'vivn']):
+                    selected_voice_id = voice.id
+                    break
+            
+            if selected_voice_id:
+                engine.setProperty('voice', selected_voice_id)
+            
+            # Generate
+            engine.save_to_file(text, temp_file)
+            engine.runAndWait()
+            
+            # Read file
+            if os.path.exists(temp_file) and os.path.getsize(temp_file) > 0:
+                with open(temp_file, 'rb') as f:
+                    audio_data = f.read()
+            else:
+                audio_data = None
+                
+        except Exception as e:
+            if self.ui: self.ui.log(f"⚠️ pyttsx3 Error: {e}", 'warning')
+            audio_data = None
+        finally:
+            # Cleanup temp file
+            try:
+                if os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except:
+                pass
+            
+        return audio_data
+
+    def speak(self, text, gender='female'):
+        """
+        Direct Speak Method (For Thread 3)
+        Handles both generation and playback synchronously.
+        """
+        if not text: return
+
+        # Smart Padding (Simple)
+        current_time = time.time()
+        if current_time - self.last_playback_time > 2.0:
+             padding = self.padding_word if self.padding_word else ""
+             if padding:
+                 text = f"{padding} {text}"
+                 if self.ui: self.ui.log(f"➕ Padding: '{padding}'", 'info')
+        self.last_playback_time = current_time
+
+        try:
+            if self.mode == 'pyttsx3':
+                self._speak_pyttsx3(text)
+            else:
+                # Edge / gTTS (File based)
+                audio_data = self.generate_audio(text, gender)
+                if audio_data:
+                    # generate_audio returns list, take first item
+                    data = audio_data[0] if isinstance(audio_data, list) else audio_data
+                    self._play_with_pygame(data)
+        except Exception as e:
+            if self.ui: self.ui.log(f"❌ Speak Error: {e}", 'error')
+
+    def _speak_pyttsx3(self, text):
+        """Direct speak using pyttsx3 (No temp files)"""
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty('rate', self.settings.get('tts_speed', 150))
+            engine.setProperty('volume', 1.0)
+            
+            # Select Voice
+            voices = engine.getProperty('voices')
+            for voice in voices:
+                if 'viet' in voice.name.lower() or 'vivn' in voice.id.lower():
+                    engine.setProperty('voice', voice.id)
+                    break
+            
+            engine.say(text)
+            engine.runAndWait()
+        except Exception as e:
+            if self.ui: self.ui.log(f"⚠️ pyttsx3 Error: {e}", 'warning')
+
+    def _play_with_pygame(self, audio_data):
+        """Simple Pygame Playback"""
+        self._ensure_mixer_init()
+        try:
+            # Detect format
+            ext = ".wav" if audio_data[:4] == b'RIFF' else ".mp3"
+            temp_file = os.path.join(tempfile.gettempdir(), f"play_{int(time.time()*1000)}_{threading.get_ident()}{ext}")
+            
+            with open(temp_file, 'wb') as f:
+                f.write(audio_data)
+            
+            pygame.mixer.music.load(temp_file)
+            pygame.mixer.music.play()
+            
+            # Wait for playback to finish (Blocking)
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)
+                
+            try:
+                os.unlink(temp_file)
+            except:
+                pass
+        except Exception as e:
+            if self.ui: self.ui.log(f"❌ Pygame Error: {e}", 'error')
+
+    # Remove old complex playback methods
+    def play_audio_data(self, audio_data):
+        pass
+    def cleanup_files(self):
+        pass

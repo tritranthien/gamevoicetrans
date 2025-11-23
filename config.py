@@ -1,6 +1,7 @@
 """
 Configuration Module
 Centralized settings management
+OPTIMIZED FOR FAST RESPONSE!
 """
 
 class Config:
@@ -37,17 +38,18 @@ class Config:
     # Compute Types
     COMPUTE_TYPES = ['int8', 'float16', 'float32']
     
-    # Default Settings
+    # Default Settings - OPTIMIZED FOR SPEED!
     DEFAULTS = {
-        'model': 'base',
+        'model': 'small',
         'compute_type': 'int8',
         'beam_size': 3,
-        'silence_threshold': 500,
+        'silence_threshold': 300,
         'tts_speed': 150,
-        'tts_engine': 'edge',  # Default to Edge TTS
-        'pause_time': 0.5,
-        'min_audio_length': 1.0,
-        'padding_words': 1  # Số từ "ừ" để padding
+        'tts_engine': 'edge',
+        'pause_time': 0.2,  # ⚡ FAST: Dịch ngay sau 0.2s pause
+        'min_audio_length': 0.3,  # ⚡ FAST: Chấp nhận câu ngắn 0.3s
+        'padding_words': 1,
+        'padding_word': 'ừm'  # Từ đệm ngắn gọn
     }
     
     # Audio Settings
